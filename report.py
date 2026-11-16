@@ -19,7 +19,7 @@ ACCEPTED, PLANNED, CANCELLED = "принята", "запланирована", "
 WORK_DATES = {
     "planned": ((), ("completed_at", "cancelled_at")),
     "done": (("completed_at",), ("cancelled_at",)),
-    "cancelled": (("cancelled_at",), ("completed_at",)),
+    "cancelled": (("cancelled_at",), ()),  # приняли, а потом отменили — бывает
 }
 PAYMENT_DATES = {
     "paid": (("paid_at",), ("refunded_at",)),
@@ -40,7 +40,7 @@ def read_csv(folder, name, columns):
     try:
         with open(Path(folder, name), encoding="utf-8-sig", newline="") as f:
             reader = csv.reader(f)
-            header = next(reader, [])
+            header = [h.strip() for h in next(reader, [])]
             for column in columns:
                 if column not in header:
                     raise DataError(f"{name}: нет колонки «{column}»")
@@ -50,16 +50,19 @@ def read_csv(folder, name, columns):
                 where = f"{name}, строка {reader.line_num}"
                 if len(values) != len(header):
                     raise DataError(f"{where}: значений {len(values)}, а колонок {len(header)}")
-                rows.append((where, dict(zip(header, values))))
-    except (OSError, UnicodeDecodeError) as e:
+                rows.append((where, dict(zip(header, (v.strip() for v in values)))))
+    except UnicodeDecodeError:
+        raise DataError(f"{name}: файл не в кодировке UTF-8, сохраните его как «CSV UTF-8»") from None
+    except OSError as e:
         raise DataError(f"{name}: не удалось прочитать файл ({e})") from None
     return rows
 
 
 def parse_money(where, row, column):
     text = row[column]
-    if not re.fullmatch(r"\d+\.\d\d", text):
-        raise DataError(f"{where}: в колонке {column} сумма «{text}», нужна запись вида 1500.00")
+    if not re.fullmatch(r"\d+(\.\d{1,2})?", text):
+        raise DataError(f"{where}: в колонке {column} сумма «{text}», нужно число без минуса "
+                        f"и не больше двух знаков после точки, например 1500.00")
     return Decimal(text)
 
 
@@ -112,8 +115,9 @@ def load(folder):
 
     columns = ("work_id", "contract_id", "title", "price", "status", "completed_at", "cancelled_at")
     work_contract = {}
+    ids = set()
     for where, row in read_csv(folder, "works.csv", columns):
-        check_id(where, row["work_id"], set(work_contract))
+        check_id(where, row["work_id"], ids)
         if row["contract_id"] not in contract_ids:
             raise DataError(f"{where}: работа {row['work_id']} относится к неизвестному договору «{row['contract_id']}»")
         work = {"work_id": row["work_id"], "contract_id": row["contract_id"], "title": row["title"],
@@ -274,9 +278,10 @@ def render(report, day):
             out.append(f"  Сумма договора больше цены работ на {money(c['amount'] - c['price'])}")
         elif c["amount"] < c["price"]:
             out.append(f"  Цена работ больше суммы договора на {money(c['price'] - c['amount'])}")
+        # эту строку сверяют с банком: в «Итого» переплата не входит
+        out.append(f"  Всего выплачено по договору: {money(c['paid'] + c['unallocated'])}")
         if c["unallocated"]:
-            out.append(f"  Переплата / нераспределено: {money(c['unallocated'])}"
-                       f" (всего выплачено {money(c['paid'] + c['unallocated'])})")
+            out.append(f"  Переплата / нераспределено: {money(c['unallocated'])}")
         if c["queued"]:
             out.append(f"  В очереди на оплату (деньги ещё не ушли, в «Выплачено» не входит): {money(c['queued'])}")
         out.append("")
@@ -284,6 +289,12 @@ def render(report, day):
     out.append("Платежи без привязки к работе зачтены по порядку: сначала принятые работы по дате приёмки,")
     out.append("затем запланированные по номеру. Каждая работа закрывается полностью, прежде чем деньги идут на следующую.")
     return "\n".join(out) + "\n"
+
+
+def last_date(contracts, works, payments):
+    """Последняя дата в файлах: что было позже, отчёт не знает (DECISIONS.md, запись 16)."""
+    return max((v for row in contracts + works + payments for v in row.values() if isinstance(v, date)),
+               default=None)
 
 
 USAGE = "Как запустить: python report.py --date 2026-11-10  (дата отчёта ГГГГ-ММ-ДД, включительно)"
@@ -309,7 +320,8 @@ def main(argv=None):
     if len(argv) == 1 and argv[0].startswith("--date="):
         argv = argv[0].split("=", 1)
     if len(argv) != 2 or argv[0] != "--date":
-        print(f"Не указана дата отчёта. {USAGE}", file=sys.stderr)
+        problem = "Команда записана неверно." if argv else "Не указана дата отчёта."
+        print(f"{problem} {USAGE}", file=sys.stderr)
         return 2
     day = parse_day(argv[1])
     if day is None:
@@ -321,6 +333,9 @@ def main(argv=None):
         print(f"Отчёт не построен — ошибка в данных: {e}", file=sys.stderr)
         return 1
     print(render(build_report(contracts, works, payments, day), day), end="")
+    last = last_date(contracts, works, payments)
+    if last is not None and day > last:
+        print(f"\nВнимание: последняя запись в файлах — от {last:%d.%m.%Y}. Что было позже, отчёт не знает.")
     return 0
 
 

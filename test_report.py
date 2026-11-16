@@ -268,11 +268,17 @@ class BadDataTest(unittest.TestCase):
     def test_done_без_даты_приёмки(self):
         self.assertStops("works.csv, строка 2", "completed_at", works=("2026-02-01", ""))
 
-    def test_сумма_с_одним_знаком(self):
-        self.assertStops("payments.csv, строка 2", "500.5", payments=("500.00", "500.5"))
+    def test_сумма_без_копеек_с_одним_знаком_и_с_пробелом_годится(self):
+        contracts, works, payments = self.load(payments=("500.00", " 500.5"), works=("1000.00", "1000"))
+        self.assertEqual((payments[0]["amount"], works[0]["price"]), (D("500.50"), D("1000.00")))
 
-    def test_сумма_без_копеек(self):
-        self.assertStops("works.csv, строка 2", "price", works=("1000.00", "1000"))
+    def test_сумма_с_тремя_знаками(self):
+        self.assertStops("payments.csv, строка 2", "500.005", payments=("500.00", "500.005"))
+
+    def test_работа_принята_а_потом_отменена(self):
+        works = self.load(works=("done,2026-02-01,", "cancelled,2026-02-01,2026-03-01"))[1]
+        self.assertEqual(report.work_state(works[0], date(2026, 2, 15)), report.ACCEPTED)
+        self.assertEqual(report.work_state(works[0], date(2026, 3, 1)), report.CANCELLED)
 
     def test_отрицательная_сумма(self):
         self.assertStops("contracts.csv, строка 2", "-1000.00", contracts=("1000.00", "-1000.00"))
@@ -302,14 +308,14 @@ class RenderTest(unittest.TestCase):
         text = report.render(build("2026-11-10"), date(2026, 11, 10))
         self.assertIn("10.11.2026", text)
         self.assertIn("Студия «Свет»", text)
-        self.assertIn("315 000,00", text)
+        self.assertIn("Всего выплачено по договору: 315 000,00", text)
         self.assertIn("В очереди на оплату", text)
         self.assertNotIn("Переплата", text)
 
     def test_переплата_видна_на_12_11(self):
         text = report.render(build("2026-11-12"), date(2026, 11, 12))
-        self.assertIn("Переплата / нераспределено", text)
-        self.assertIn("Переплата / нераспределено: 5 000,00 (всего выплачено 95 000,00)", text)
+        self.assertIn("Переплата / нераспределено: 5 000,00", text)
+        self.assertIn("Всего выплачено по договору: 95 000,00", text)  # в «Итого» только 90 000
 
     def test_в_отчёте_нет_технических_слов(self):
         text = report.render(build("2026-11-10"), date(2026, 11, 10))
@@ -351,7 +357,11 @@ class CommandLineTest(unittest.TestCase):
         self.assertRussianError(run_report("--date", "2026-02-30"), "«2026-02-30» записана неверно")
 
     def test_лишнее_в_команде(self):
-        self.assertRussianError(run_report("--date", "2026-11-10", "--csv"), "Не указана дата отчёта")
+        self.assertRussianError(run_report("--date", "2026-11-10", "--csv"), "Команда записана неверно")
+
+    def test_дата_позже_последней_записи_в_файлах(self):
+        self.assertIn("последняя запись в файлах — от 12.11.2026", run_report("--date", "2030-01-01").stdout)
+        self.assertNotIn("последняя запись", run_report("--date", "2026-11-12").stdout)
 
     def test_подсказка(self):
         result = run_report("-h")
